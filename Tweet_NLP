@@ -1,0 +1,173 @@
+import pandas as pd
+import numpy as np
+import re
+import string
+import nltk
+from spellchecker import SpellChecker
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.layers import Dense, Input, GlobalMaxPooling1D, Dropout
+from tensorflow.keras.layers import LSTM, Embedding
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import SGD, Adam
+from tensorflow.keras.regularizers import l2
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+
+# Read the train file
+tweet = pd.read_csv("C:/Users/Jahanzaib Talpur/Desktop/Kaggle/Real_Or_Fake_Tweets/train.csv")
+tweet = tweet[['text', 'target']]
+
+
+# Remove duplicates
+tweet = tweet.drop_duplicates('text', keep=False)
+tweet['target'].value_counts()[0]/tweet['target'].count() * 100
+tweet['target'].value_counts()[1]/tweet['target'].count() * 100
+
+
+# Remove http urls
+def remove_http(sentence):
+    new_sentence = sentence
+    x = re.search("http", new_sentence)
+    if x:
+        new_sentence = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', new_sentence)
+    else:
+        new_sentence = new_sentence
+    return new_sentence
+
+
+# Remove punctuation
+def remove_punctuation(sentence):
+    new_sentence = sentence.lower()
+    new_sentence = re.sub(r'\d', '', new_sentence)
+    new_sentence = new_sentence.strip()
+    for character in new_sentence:
+        if character in string.punctuation:
+            new_sentence = new_sentence.replace(character, '')
+    return new_sentence
+
+
+# SpellChecker
+spell = SpellChecker()
+def correct_spelling(sentence):
+    new_sentence = []
+    for word in sentence:
+        new_word = spell.correction(word)
+        new_sentence.append(new_word)
+    return new_sentence
+
+
+# stopwords
+stopword = nltk.corpus.stopwords.words('english')
+def remove_stopword(sentence):
+    new_sentence = []
+    for word in sentence:
+        if word not in stopword:
+            new_sentence.append(word)
+    return new_sentence
+
+
+# Remove words with less length and extra length
+tweet = tweet[tweet.Text_No_Stopwords.str.len() > 4].reset_index(drop=True)
+tweet = tweet[tweet.Text_No_Stopwords.str.len() < 19].reset_index(drop=True)
+
+
+# lemmatization
+lemma = nltk.WordNetLemmatizer()
+def lemmatize(sentence):
+    new_sentence = []
+    new_text = ''
+    for word in sentence:
+        lemma_word = lemma.lemmatize(word)
+        new_sentence.append(lemma_word)
+        new_text = ' '.join(new_sentence)
+    return new_text
+
+
+# Run to clean data for model
+tweet['text_No_http'] = tweet['text'].apply(remove_http)
+tweet['Text_No_Punctuation'] = tweet['text_No_http'].apply(remove_punctuation)
+tweet['Text_Tokenized'] = tweet['Text_No_Punctuation'].apply(nltk.word_tokenize)
+tweet['Text_Spelling'] = tweet['Text_Tokenized'].apply(correct_spelling)
+tweet['Text_No_Stopwords'] = tweet['Text_Spelling'].apply(remove_stopword)
+tweet['lemma_word'] = tweet['Text_No_Stopwords'].apply(lemmatize)
+
+
+# Split the Data
+X = pd.DataFrame(tweet['lemma_word'])
+y = tweet['target'].values
+X_train, X_test, y_train, y_test = train_test_split(X['lemma_word'], y, test_size=0.30, random_state=23)
+
+
+# Convert sentences into sequences
+MAX_VOCAB_SIZE = 20000
+tokenizer = Tokenizer(num_words=MAX_VOCAB_SIZE)
+tokenizer.fit_on_texts(X_train)
+sequences_train = tokenizer.texts_to_sequences(X_train)
+sequences_test = tokenizer.texts_to_sequences(X_test)
+
+
+# word to integer mapping
+word2idx = tokenizer.word_index
+V = len(word2idx)
+print(f'Found {V} unique tokens')
+
+
+# pad sequences
+data_train = pad_sequences(sequences_train)
+print(f'Shape of data train tensor: {data_train.shape}')
+T = data_train.shape[1]
+data_test = pad_sequences(sequences_test, maxlen=T)
+
+# Create the model
+D = 50
+M = 5
+i = Input(shape=(T, ))
+x = Embedding(V+1, D)(i)
+x = Dropout(.3)(x)
+x = LSTM(M, return_sequences=True)(x)
+x = Dropout(.5)(x)
+x = GlobalMaxPooling1D(data_format='channels_first')(x)
+x = Dense(10, activation='relu')(x)
+x = Dense(5, activation='relu', kernel_regularizer=l2(l=0.01))(x)
+x = Dense(1, activation='sigmoid')(x)
+model = Model(i, x)
+model.compile(
+    loss='binary_crossentropy',
+    optimezer=Adam(lr=0.01),
+    metrics=['accuracy', 'binary_crossentropy', tf.keras.metrics.AUC()]
+)
+model.summary()
+
+
+# Train the model
+r = model.fit(data_train, y_train,
+              epochs=15,
+              validation_data=(data_test, y_test))
+
+
+# Plots of metrics
+plt.plot(r.history['loss'], label='Loss')
+plt.plot(r.history['val_loss'], label='Val Loss')
+plt.legend()
+
+plt.plot(r.history['binary_crossentropy'], label='Binary Crossentropy')
+plt.plot(r.history['val_binary_crossentropy'], label='Val Binary Crossentropy')
+plt.legend()
+
+plt.plot(r.history['auc'], label='AUC')
+plt.plot(r.history['val_auc'], label='Val AUC')
+plt.legend()
+
+plt.plot(r.history['accuracy'], label='Accuracy')
+plt.plot(r.history['val_accuracy'], label='Val Accuracy')
+plt.legend()
+
+
+# Predict the model
+y_pred = model.predict(data_test)
+y_pred = np.round(y_pred).flatten()
+print(f'Manually calculated accuracy: {np.mean(y_pred == y_test)}')
+print(f'Evaluate Output: {model.evaluate(data_test, y_test)}')
